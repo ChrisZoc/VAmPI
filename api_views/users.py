@@ -59,6 +59,8 @@ def get_by_username(username):
 
 def register_user():
     request_data = request.get_json()
+    if request_data and 'admin' in request_data:
+        return Response(error_message_helper("Unexpected field: admin"), 400, mimetype="application/json")
     # check if user already exists
     user = User.query.filter_by(username=request_data.get('username')).first()
     if not user:
