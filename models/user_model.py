@@ -1,9 +1,8 @@
 import datetime
 import jwt
 from sqlalchemy.orm import relationship
-from werkzeug.security import generate_password_hash, check_password_hash
 from config import db, vuln_app
-from app import vuln, alive
+from app import alive
 from models.books_model import Book
 from random import randrange
 
@@ -21,7 +20,7 @@ class User(db.Model):
     def __init__(self, username, password, email, admin=False):
         self.username = username
         self.email = email
-        self.password = generate_password_hash(password)
+        self.password = password
         self.admin = admin
 
     def __repr__(self):
@@ -56,13 +55,7 @@ class User(db.Model):
         return {'username': self.username, 'email': self.email}
 
     def json_debug(self):
-        return {'username': self.username, 'email': self.email, 'admin': self.admin}
-
-    def check_password(self, password):
-        return check_password_hash(self.password, password)
-
-    def set_password(self, password):
-        self.password = generate_password_hash(password)
+        return {'username': self.username, 'password': self.password, 'email': self.email, 'admin': self.admin}
 
     @staticmethod
     def get_all_users():
@@ -78,7 +71,7 @@ class User(db.Model):
 
     @staticmethod
     def register_user(username, password, email, admin=False):
-        new_user = User(username=username, password=password, email=email, admin=False)
+        new_user = User(username=username, password=password, email=email, admin=admin)
         randomint = str(randrange(100))
         new_user.books = [Book(book_title="bookTitle" + randomint, secret_content="secret for bookTitle" + randomint)]
         db.session.add(new_user)
@@ -94,8 +87,4 @@ class User(db.Model):
     def init_db_users():
         User.register_user("name1", "pass1", "mail1@mail.com", False)
         User.register_user("name2", "pass2", "mail2@mail.com", False)
-        admin_user = User(username="admin", password="pass1", email="admin@mail.com", admin=True)
-        randomint = str(randrange(100))
-        admin_user.books = [Book(book_title="bookTitle" + randomint, secret_content="secret for bookTitle" + randomint)]
-        db.session.add(admin_user)
-        db.session.commit()
+        User.register_user("admin", "pass1", "admin@mail.com", True)

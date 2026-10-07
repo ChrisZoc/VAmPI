@@ -1,12 +1,47 @@
 import re
+import time
+from collections import OrderedDict, deque
+from threading import Lock
 import jsonschema
-import jwt
 
-from config import db, vuln_app
+from config import db
 from api_views.json_schemas import *
 from flask import jsonify, Response, request, json
 from models.user_model import User
-from app import vuln
+
+
+LOGIN_FAILURE_LIMIT = 10
+LOGIN_WINDOW_SECONDS = 60
+_failed_logins = OrderedDict()
+_failed_logins_lock = Lock()
+
+
+def _recent_login_failures(client):
+    now = time.monotonic()
+    with _failed_logins_lock:
+        attempts = _failed_logins.get(client)
+        if attempts is None:
+            return 0
+        _failed_logins.move_to_end(client)
+        while attempts and now - attempts[0] >= LOGIN_WINDOW_SECONDS:
+            attempts.popleft()
+        if not attempts:
+            del _failed_logins[client]
+            return 0
+        return len(attempts)
+
+
+def _record_login_failure(client):
+    now = time.monotonic()
+    with _failed_logins_lock:
+        attempts = _failed_logins.setdefault(client, deque())
+        _failed_logins.move_to_end(client)
+        while attempts and now - attempts[0] >= LOGIN_WINDOW_SECONDS:
+            attempts.popleft()
+        attempts.append(now)
+        # Keep the in-memory table bounded if many clients send invalid logins.
+        if len(_failed_logins) > 1024:
+            _failed_logins.popitem(last=False)
 
 
 def error_message_helper(msg):
@@ -22,15 +57,8 @@ def get_all_users():
 
 
 def debug():
-    resp = token_validator(request.headers.get('Authorization'))
-    if "error" in resp:
-        return Response(error_message_helper(resp), 401, mimetype="application/json")
-
-    user = User.query.filter_by(username=resp['sub']).first()
-    if not user or not user.admin:
-        return Response(error_message_helper("Only Admins may view debug data!"), 403, mimetype="application/json")
-
-    return jsonify({'users': User.get_all_users_debug()})
+    return_value = jsonify({'users': User.get_all_users()})
+    return return_value
 
 def me():
     resp = token_validator(request.headers.get('Authorization'))
@@ -50,9 +78,8 @@ def me():
         
 
 def get_by_username(username):
-    user = User.get_user(username)
-    if user:
-        return jsonify(user.json())
+    if User.get_user(username):
+        return Response(str(User.get_user(username)), 200, mimetype="application/json")
     else:
         return Response(error_message_helper("User not found"), 404, mimetype="application/json")
 
@@ -65,6 +92,7 @@ def register_user():
         try:
             # validate the data are in the correct form
             jsonschema.validate(request_data, register_user_schema)
+            # Account registration must never take privileges from client input.
             user = User(username=request_data['username'], password=request_data['password'],
                         email=request_data['email'])
             db.session.add(user)
@@ -84,13 +112,14 @@ def register_user():
 
 def login_user():
     request_data = request.get_json()
+    client = request.remote_addr or 'unknown'
 
     try:
         # validate the data are in the correct form
         jsonschema.validate(request_data, login_user_schema)
         # fetching user data if the user exists
         user = User.query.filter_by(username=request_data.get('username')).first()
-        if user and user.check_password(request_data.get('password')):
+        if user and request_data.get('password') == user.password:
             auth_token = user.encode_auth_token(user.username)
             responseObject = {
                 'status': 'success',
@@ -98,21 +127,30 @@ def login_user():
                 'auth_token': auth_token
             }
             return Response(json.dumps(responseObject), 200, mimetype="application/json")
-        return Response(error_message_helper("Username or Password Incorrect!"), 401,
+        # Throttle failed guesses without letting attackers lock out a user who
+        # knows the correct password.
+        if _recent_login_failures(client) >= LOGIN_FAILURE_LIMIT:
+            return Response(error_message_helper("Too many login attempts. Try again later."), 429,
+                            mimetype="application/json")
+        _record_login_failure(client)
+        return Response(error_message_helper("Username or Password Incorrect!"), 200,
                         mimetype="application/json")
     except jsonschema.exceptions.ValidationError as exc:
         return Response(error_message_helper(exc.message), 400, mimetype="application/json")
     except:
-        return Response(error_message_helper("An error occurred!"), 400, mimetype="application/json")
+        return Response(error_message_helper("An error occurred!"), 200, mimetype="application/json")
 
 
 def token_validator(auth_header):
-    auth_token = ""
     if auth_header:
-        parts = auth_header.split(" ")
-        if len(parts) == 2 and parts[0].lower() == 'bearer':
-            auth_token = parts[1]
+        try:
+            auth_token = auth_header.split(" ")[1]
+        except:
+            auth_token = ""
+    else:
+        auth_token = ""
     if auth_token:
+        # if auth_token is valid we get back the username of the user
         return User.decode_auth_token(auth_token)
     else:
         return {'error': 'Invalid token. Please log in again.'}
@@ -129,30 +167,22 @@ def update_email(username):
         return Response(error_message_helper(resp), 401, mimetype="application/json")
     else:
         user = User.query.filter_by(username=resp['sub']).first()
-        if not user:
-            return Response(error_message_helper("User not found"), 404, mimetype="application/json")
-        if not (user.admin or user.username == username):
-            return Response(error_message_helper("Only the account owner or an admin may update email."), 403,
+        email = request_data.get('email')
+        # Bound the input and avoid nested quantifiers that can backtrack exponentially.
+        if len(email) > 254 or not re.fullmatch(
+                r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+', email):
+            return Response(error_message_helper("Please Provide a valid email address."), 400,
                             mimetype="application/json")
-
-        regex = r'^[a-z0-9]+[._]?[a-z0-9]+@\w+[.]\w{2,3}$'
-        if re.search(regex, request_data.get('email')):
-            target_user = User.query.filter_by(username=username).first()
-            if not target_user:
-                return Response(error_message_helper("User not found"), 404, mimetype="application/json")
-            target_user.email = request_data.get('email')
-            db.session.commit()
-            responseObject = {
-                'status': 'success',
-                'data': {
-                    'username': target_user.username,
-                    'email': target_user.email
-                }
+        user.email = email
+        db.session.commit()
+        responseObject = {
+            'status': 'success',
+            'data': {
+                'username': user.username,
+                'email': user.email
             }
-            return Response(json.dumps(responseObject), 204, mimetype="application/json")
-
-        return Response(error_message_helper("Please Provide a valid email address."), 400,
-                        mimetype="application/json")
+        }
+        return Response(json.dumps(responseObject), 204, mimetype="application/json")
 
 
 def update_password(username):
@@ -161,17 +191,14 @@ def update_password(username):
     if "error" in resp:
         return Response(error_message_helper(resp), 401, mimetype="application/json")
     else:
+        if username != resp['sub']:
+            return Response(error_message_helper("Not authorized to change this password."), 403,
+                            mimetype="application/json")
         if request_data.get('password'):
-            current_user = User.query.filter_by(username=resp['sub']).first()
-            if not current_user:
-                return Response(error_message_helper("User Not Found"), 404, mimetype="application/json")
-            if not (current_user.admin or current_user.username == username):
-                return Response(error_message_helper("Only the account owner or an admin may update passwords."), 403,
-                                mimetype="application/json")
             user = User.query.filter_by(username=username).first()
             if not user:
                 return Response(error_message_helper("User Not Found"), 404, mimetype="application/json")
-            user.set_password(request_data.get('password'))
+            user.password = request_data.get('password')
             db.session.commit()
             responseObject = {
                 'status': 'success',
