@@ -1,11 +1,11 @@
 import datetime
 import jwt
 from sqlalchemy.orm import relationship
+from werkzeug.security import generate_password_hash, check_password_hash
 from config import db, vuln_app
 from app import vuln, alive
 from models.books_model import Book
 from random import randrange
-from sqlalchemy.sql import text
 
 
 class User(db.Model):
@@ -21,7 +21,7 @@ class User(db.Model):
     def __init__(self, username, password, email, admin=False):
         self.username = username
         self.email = email
-        self.password = password
+        self.password = generate_password_hash(password)
         self.admin = admin
 
     def __repr__(self):
@@ -56,7 +56,13 @@ class User(db.Model):
         return {'username': self.username, 'email': self.email}
 
     def json_debug(self):
-        return {'username': self.username, 'password': self.password, 'email': self.email, 'admin': self.admin}
+        return {'username': self.username, 'email': self.email, 'admin': self.admin}
+
+    def check_password(self, password):
+        return check_password_hash(self.password, password)
+
+    def set_password(self, password):
+        self.password = generate_password_hash(password)
 
     @staticmethod
     def get_all_users():
@@ -68,17 +74,7 @@ class User(db.Model):
 
     @staticmethod
     def get_user(username):
-        if vuln:  # SQLi Injection
-            user_query = f"SELECT * FROM users WHERE username = '{username}'"
-            query = db.session.execute(text(user_query))
-            ret = query.fetchone()
-            if ret:
-                fin_query = '{"username": "%s", "email": "%s"}' % (ret[1], ret[3])
-            else:
-                fin_query = None
-        else:
-            fin_query = User.query.filter_by(username=username).first()
-        return fin_query
+        return User.query.filter_by(username=username).first()
 
     @staticmethod
     def register_user(username, password, email, admin=False):
