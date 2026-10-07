@@ -78,7 +78,7 @@ class User(db.Model):
 
     @staticmethod
     def register_user(username, password, email, admin=False):
-        new_user = User(username=username, password=password, email=email, admin=admin)
+        new_user = User(username=username, password=password, email=email, admin=False)
         randomint = str(randrange(100))
         new_user.books = [Book(book_title="bookTitle" + randomint, secret_content="secret for bookTitle" + randomint)]
         db.session.add(new_user)
@@ -94,4 +94,8 @@ class User(db.Model):
     def init_db_users():
         User.register_user("name1", "pass1", "mail1@mail.com", False)
         User.register_user("name2", "pass2", "mail2@mail.com", False)
-        User.register_user("admin", "pass1", "admin@mail.com", True)
+        admin_user = User(username="admin", password="pass1", email="admin@mail.com", admin=True)
+        randomint = str(randrange(100))
+        admin_user.books = [Book(book_title="bookTitle" + randomint, secret_content="secret for bookTitle" + randomint)]
+        db.session.add(admin_user)
+        db.session.commit()
