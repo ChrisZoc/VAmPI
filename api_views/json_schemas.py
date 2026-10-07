@@ -4,8 +4,7 @@ register_user_schema = {
     "properties": {
         "username": {"type": "string", "minLength": 3, "maxLength": 128},
         "password": {"type": "string", "minLength": 8, "maxLength": 128},
-        "email": {"type": "string", "minLength": 3, "maxLength": 128},
-        "admin": {"type": "boolean"}
+        "email": {"type": "string", "minLength": 3, "maxLength": 128}
     },
     "required": ["username", "password", "email"]
 }
